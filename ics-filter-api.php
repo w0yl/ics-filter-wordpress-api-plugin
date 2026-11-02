@@ -116,6 +116,7 @@ class ICS_Filter_API {
                 $response = wp_remote_get( $ics_url, [ 'timeout' => 20 ] );
 
                 if ( is_wp_error( $response ) ) {
+                    delete_transient( $lock_key );
                     return new WP_Error( 'fetch_failed', 'Failed to fetch the ICS file: ' . $response->get_error_message(), [ 'status' => 502 ] );
                 }
 
@@ -123,6 +124,7 @@ class ICS_Filter_API {
                 $status_code = wp_remote_retrieve_response_code( $response );
 
                 if ( 200 !== $status_code || empty( $ics_content ) ) {
+                    delete_transient( $lock_key );
                     return new WP_Error( 'invalid_ics_response', 'The remote server returned an invalid response or empty calendar.', [ 'status' => 502 ] );
                 }
 
