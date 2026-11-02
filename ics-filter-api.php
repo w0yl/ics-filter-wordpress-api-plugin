@@ -3,7 +3,7 @@
  * Plugin Name: ICS Filter REST API
  * Plugin URI:  https://github.com/w0yl/ics-filter-wordpress-api-plugin
  * Description: Adds a secured, cached custom REST API endpoint to fetch and filter an ICS calendar by keywords.
- * Version:     1.1.0
+ * Version:     1.1.1
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:      SCARC
@@ -35,6 +35,30 @@ class ICS_Filter_API {
                     'required'          => true,
                     'type'              => 'string',
                     'sanitize_callback' => 'esc_url_raw',
+                    'validate_callback' => function( $param, $request, $key ) {
+                        // Ensure it's a valid HTTP/HTTPS URL
+                        if ( ! wp_http_validate_url( $param ) ) {
+                            return new WP_Error( 'rest_invalid_url', 'The provided URL is invalid or uses an unsupported protocol.', [ 'status' => 400 ] );
+                        }
+
+                        $parsed_url = parse_url( $param );
+                        $host       = $parsed_url['host'] ?? '';
+
+                        // Block explicit localhost/loopback or metadata hosts
+                        $blocked_hosts = [ 'localhost', '127.0.0.1', '0.0.0.0', '169.254.169.254' ];
+                        if ( in_array( strtolower( $host ), $blocked_hosts, true ) ) {
+                            return new WP_Error( 'rest_forbidden_url', 'Requests to local or internal network addresses are not allowed.', [ 'status' => 400 ] );
+                        }
+
+                        // Block private or reserved IP ranges if the host is an IP address
+                        if ( filter_var( $host, FILTER_VALIDATE_IP ) ) {
+                            if ( ! filter_var( $host, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE ) ) {
+                                return new WP_Error( 'rest_forbidden_url', 'Requests to private or reserved IP addresses are not allowed.', [ 'status' => 400 ] );
+                            }
+                        }
+
+                        return true;
+                    },
                     'description'       => 'The absolute URL of the ICS calendar.',
                 ],
                 'keywords' => [
