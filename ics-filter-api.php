@@ -3,7 +3,7 @@
  * Plugin Name: ICS Filter REST API
  * Plugin URI:  https://github.com/w0yl/ics-filter-wordpress-api-plugin
  * Description: Adds a secured, cached custom REST API endpoint to fetch and filter an ICS calendar by keywords.
- * Version:     1.0.0
+ * Version:     1.1.0
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:      SCARC
@@ -89,28 +89,53 @@ class ICS_Filter_API {
             return new WP_Error( 'no_keywords', 'At least one valid keyword must be provided.', [ 'status' => 400 ] );
         }
 
-        sort( $keywords );
-        $cache_key = 'ics_filter_' . md5( $ics_url . '_' . implode( '|', $keywords ) );
+        $raw_cache_key = 'ics_filter_api_raw_' . md5( $ics_url );
+        $lock_key      = 'ics_filter_api_lock_' . md5( $ics_url );
         
-        $filtered_ics = get_transient( $cache_key );
+        $ics_content = get_transient( $raw_cache_key );
 
-        if ( false === $filtered_ics ) {
-            $response = wp_remote_get( $ics_url, [ 'timeout' => 20 ] );
-
-            if ( is_wp_error( $response ) ) {
-                return new WP_Error( 'fetch_failed', 'Failed to fetch the ICS file: ' . $response->get_error_message(), [ 'status' => 502 ] );
+        // If the raw calendar isn't cached yet, handle concurrent requests
+        if ( false === $ics_content ) {
+            $retry_count = 0;
+            
+            // If another request is currently fetching it, wait up to 2 seconds for it to finish
+            while ( get_transient( $lock_key ) && $retry_count < 5 ) {
+                usleep( 400000 ); // Wait 0.4 seconds
+                $ics_content = get_transient( $raw_cache_key );
+                if ( false !== $ics_content ) {
+                    break; // Success! Another request finished downloading it.
+                }
+                $retry_count++;
             }
 
-            $ics_content = wp_remote_retrieve_body( $response );
-            $status_code = wp_remote_retrieve_response_code( $response );
+            // If it's still missing, this request takes ownership of fetching it
+            if ( false === $ics_content ) {
+                // Set a lock so other concurrent requests know to wait
+                set_transient( $lock_key, true, 15 );
 
-            if ( 200 !== $status_code || empty( $ics_content ) ) {
-                return new WP_Error( 'invalid_ics_response', 'The remote server returned an invalid response or empty calendar.', [ 'status' => 502 ] );
+                $response = wp_remote_get( $ics_url, [ 'timeout' => 20 ] );
+
+                if ( is_wp_error( $response ) ) {
+                    return new WP_Error( 'fetch_failed', 'Failed to fetch the ICS file: ' . $response->get_error_message(), [ 'status' => 502 ] );
+                }
+
+                $ics_content = wp_remote_retrieve_body( $response );
+                $status_code = wp_remote_retrieve_response_code( $response );
+
+                if ( 200 !== $status_code || empty( $ics_content ) ) {
+                    return new WP_Error( 'invalid_ics_response', 'The remote server returned an invalid response or empty calendar.', [ 'status' => 502 ] );
+                }
+
+                // Cache the raw content for 1 hour
+                set_transient( $raw_cache_key, $ics_content, HOUR_IN_SECONDS );
+
+                // Clear the lock after the raw content is cached
+                delete_transient( $lock_key );
             }
-
-            $filtered_ics = $this->filter_ics_events( $ics_content, $keywords );
-            set_transient( $cache_key, $filtered_ics, HOUR_IN_SECONDS );
         }
+
+        // Perform local keyword filtering instantly
+        $filtered_ics = $this->filter_ics_events( $ics_content, $keywords );
 
         // Send raw text/calendar headers and output exact string without JSON encoding wrappers
         status_header( 200 );
@@ -225,8 +250,8 @@ class ICS_Filter_API {
         // Handle cache clearing action if button was clicked
         if ( isset( $_POST['ics_clear_cache_nonce'] ) && wp_verify_nonce( $_POST['ics_clear_cache_nonce'], 'ics_clear_cache_action' ) ) {
             global $wpdb;
-            // Delete all transients matching our ics_filter_ prefix from the database options table
-            $wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_ics_filter_%' OR option_name LIKE '_transient_timeout_ics_filter_%'" );
+            // Delete all transients matching our ics_filter_api_ prefix from the database options table
+            $wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_ics_filter_api_%' OR option_name LIKE '_transient_timeout_ics_filter_api_%'" );
             echo '<div class="notice notice-success is-dismissible"><p><strong>Calendar cache successfully cleared!</strong></p></div>';
         }
         ?>
